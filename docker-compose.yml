@@ -1,0 +1,39 @@
+services:
+  res-node-1:
+    container_name: res-node-1
+    build:
+      context: ./res-node
+      dockerfile: Dockerfile
+    environment:
+      - NODE_NUM=1
+      # - PORT=3000
+  res-node-2:
+    container_name: res-node-2
+    build:
+      context: ./res-node
+      dockerfile: Dockerfile
+    environment:
+      - NODE_NUM=2
+      # - PORT=3000
+  res-node-3:
+    container_name: res-node-3
+    build:
+      context: ./res-node
+      dockerfile: Dockerfile
+    environment:
+      - NODE_NUM=3
+      # - PORT=3000
+  lb-server:
+    container_name: lb-server
+    build:
+      context: ./loadbalancer
+      dockerfile: Dockerfile
+    env_file:
+      - ./loadbalancer/.env
+    ports:
+      - 8081:8081
+    depends_on:
+      - res-node-1
+      - res-node-2
+      - res-node-3
+      # TODO - mysql db 추가
