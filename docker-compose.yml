@@ -6,7 +6,6 @@ services:
       dockerfile: Dockerfile
     environment:
       - NODE_NUM=1
-      # - PORT=3000
   res-node-2:
     container_name: res-node-2
     build:
@@ -14,7 +13,6 @@ services:
       dockerfile: Dockerfile
     environment:
       - NODE_NUM=2
-      # - PORT=3000
   res-node-3:
     container_name: res-node-3
     build:
@@ -22,7 +20,6 @@ services:
       dockerfile: Dockerfile
     environment:
       - NODE_NUM=3
-      # - PORT=3000
   lb-server:
     container_name: lb-server
     build:
