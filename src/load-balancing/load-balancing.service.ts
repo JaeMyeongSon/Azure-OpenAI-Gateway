@@ -1,207 +1,140 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import axios from 'axios';
 import { ERROR_CODE, ERROR_MESSAGE } from '../network.status.constants';
+import { CircuitBreakerService } from './circuit-breaker.service';
+import { InstanceConfigService, AiInstance } from './instance-config.service';
 
 @Injectable()
 export class LoadBalancingService {
   private readonly logger = new Logger(LoadBalancingService.name);
-  constructor() {}
 
-  // 엔드포인트 주소 목록
-  endpointList: string[] = [
-    process.env.OPENAI_ENDPOINT1,
-    process.env.OPENAI_ENDPOINT2,
-    process.env.OPENAI_ENDPOINT3,
-    process.env.OPENAI_ENDPOINT4,
-    process.env.OPENAI_ENDPOINT5,
-    process.env.OPENAI_ENDPOINT6,
-    process.env.OPENAI_ENDPOINT7,
-    process.env.OPENAI_ENDPOINT8,
-    process.env.OPENAI_ENDPOINT9,
-    process.env.OPENAI_ENDPOINT10,
-  ];
+  private readonly instanceConfigService: InstanceConfigService;
+  private readonly circuitBreakerService: CircuitBreakerService;
+  constructor(instanceConfigService: InstanceConfigService, circuitBreakerService: CircuitBreakerService) {
+      this.instanceConfigService = instanceConfigService;
+      this.circuitBreakerService = circuitBreakerService;
+  }
 
-  // OpenAI 키 목록
-  openaiKeyList: string[] = [
-    process.env.OPENAI_KEY1,
-    process.env.OPENAI_KEY2,
-    process.env.OPENAI_KEY3,
-    process.env.OPENAI_KEY4,
-    process.env.OPENAI_KEY5,
-    process.env.OPENAI_KEY6,
-    process.env.OPENAI_KEY7,
-    process.env.OPENAI_KEY8,
-    process.env.OPENAI_KEY9,
-    process.env.OPENAI_KEY10,
-  ];
 
-  // 해당 함수 내에서 토큰 및 모니터링을 위한 데이터 수집 로직을 추가 해야합니다.(DB 설계 이후)
-  async sendAzureOpenAIGetChatCompletions(
-    deploymentName: string,
-    method: string,
-    apiVersion: string,
-    data: any,
-  ) {
-    for (let i = 0; i < this.endpointList.length; i++) {
-      try {
-        this.logger.debug(`Retry ${i}th endpoint`);
-        this.logger.debug(this.endpointList[i]);
+  private selectInstance(): AiInstance | null {
+    const instances = this.instanceConfigService.getInstances();
 
-        const result = await this.sendChatCompletionRequest(
-          this.endpointList[i],
-          this.openaiKeyList[i],
-          deploymentName,
-          method,
-          apiVersion,
-          data,
-        );
+    // Filter available instances
+    const availableInstances = instances.filter(
+        instance => this.circuitBreakerService.isInstanceAvailable(instance.id)
+    );
 
-        if (result.data && result.status === 200) {
-          return result.data;
-        }
-      } catch (error) {
-        // 타임아웃 에러 처리: error.code가 'ECONNABORTED' 인 경우
-        if (error.code === 'ECONNABORTED') {
-          this.logger.error('Request Timeout 발생');
-          await this.handleRateLimitExceeded({
-            response: {
-              status: ERROR_CODE.NET_E_TOO_MANY_REQUESTS,
-              data: { message: 'Request Timeout' },
-            },
-          });
-          continue;
-        }
+    if (availableInstances.length === 0) {
+        return null;
+    }
 
-        if (error.response) {
-          // Content Filter 에러 처리
-          if (
-            error.response.status === 400 &&
-            error.response.data.error.code === 'content_filter'
-          ) {
-            this.logger.error(
-              ERROR_MESSAGE(ERROR_CODE.NET_E_CONTENT_FILTER_UNSAFE),
-            );
-            this.logger.error(error.response.data);
-            throw new HttpException(
-              error.response.data,
-              ERROR_CODE.NET_E_CONTENT_FILTER_UNSAFE,
-            );
-          }
+    // priority가 높을수록 선택확률이 높아지도록
+    const instancesWithPriority = availableInstances.map(instance => ({            
+        instance,
+        priority: instance.weight * this.circuitBreakerService.getSuccessRate(instance.id)
+    }));
 
-          // Rate Limit Exceeded(429) 에러 처리
-          await this.handleRateLimitExceeded(error);
-          continue;
-        }
+    // 전체 가중치 구하기
+    let totalPriority = 0;
+    for (const entry of instancesWithPriority) {
+        totalPriority += entry.priority;
+    }
 
-        // 기타 에러 처리
-        this.logger.error(error.message);
-        throw error;
+    // 모든 instance의 weight이 0일 경우, 누적값으로 선택될 수 없음 -> 균등한 확률부여
+    if (totalPriority === 0) {
+        const randomIndex = Math.floor(Math.random() * availableInstances.length);
+        return availableInstances[randomIndex];
+    }
+
+    let randomValue = Math.random() * totalPriority;
+    let accumulated = 0;
+    for (const item of instancesWithPriority) {
+        accumulated += item.priority;
+        // 누적값이 randomValues를 넘는 최초의 항목 선택
+        if (randomValue < accumulated) {
+            return item.instance;
+        } 
+    }
+    // Fallback (shouldn't reach here, but just in case)
+    return instancesWithPriority[instancesWithPriority.length - 1].instance;
+}
+
+           
+async makeRequest(requestBody: any, timeout?: number): Promise<any> {
+  const MAX_RETRIES = 3;
+  const BASE_DELAY = 1000; // 1초
+  const REQUEST_TIMEOUT = timeout || 30000;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+     
+      const selectedInstance = this.selectInstance();
+      if (!selectedInstance){
+          throw new Error('No available Instances');
       }
-    }
 
-    this.logger.error('All endpoints are failed');
-    throw new HttpException(
-      'i-Learning LoadBalancer: All endpoints are failed',
-      ERROR_CODE.NET_E_TOO_MANY_REQUESTS,
-    );
+      // HALF_OPEN 상태인 경우, 잠금 획득 => 
+      // 사실 이미 테스팅하고있는 애들은 select instance할 때 이미 걸러짐 이건 동시성 문제 체크용도
+      let hasHalfOpenLock = false;
+      const circuitState = this.circuitBreakerService.getCircuitState(selectedInstance.id);
+      if (circuitState === 'HALF_OPEN') {
+          hasHalfOpenLock = this.circuitBreakerService.acquireHalfOpenLock(selectedInstance.id);
+          if (!hasHalfOpenLock) {
+              continue;
+          }
+      }
+
+      try {
+
+          const url = `${selectedInstance.instanceEndpoint}openai/deployments/${selectedInstance.instanceDeployment}/chat/completions?api-version=${selectedInstance.instanceVersion}`;
+          const headers = {
+            'api-key': selectedInstance.instanceApiKey,
+            'Content-Type': 'application/json'
+          };
+
+          const response = await axios.post(url, requestBody, {
+              headers, 
+              timeout: REQUEST_TIMEOUT
+          })
+          
+          this.circuitBreakerService.recordSuccess(selectedInstance.id);
+          return response.data;
+          
+      } catch (error) {
+          if (axios.isAxiosError(error) && error.response) {
+              const statusCode = error.response.status;
+
+              //client errors not an instance failure, throw immediately
+              if([400, 401, 404, 413, 422, 403].includes(statusCode)){
+                  throw error; 
+              }
+
+              //Rate limit - exponential backoff
+              if (statusCode === 429) {
+                  this.circuitBreakerService.recordFailure(selectedInstance.id);
+                  if (attempt < MAX_RETRIES) {
+                      //If attempt is 1: 2^0, if 2: 2^1
+                      const delay = BASE_DELAY * (2 ** (attempt - 1));
+                      //timeout 만큼 기다렸다가 continue retry loop
+                      await new Promise(resolve => setTimeout(resolve, delay));
+                  }
+                  continue;
+              }
+
+              if ([500, 502, 503].includes(statusCode)) {
+                  this.circuitBreakerService.recordFailure(selectedInstance.id);
+                  //continue retry loop
+                  continue;
+              }
+          }
+          //Timeout or other errors
+          this.circuitBreakerService.recordFailure(selectedInstance.id);
+      } finally {
+          if (hasHalfOpenLock) {
+              this.circuitBreakerService.releaseHalfOpenLock(selectedInstance.id);
+          }
+      }
   }
 
-  async sendChatCompletionRequest(
-    endpoint: string,
-    openaiKey: string,
-    deploymentName: string,
-    method: string,
-    apiVersion: string,
-    data: any,
-  ) {
-    return await axios.post(
-      `${endpoint}/openai/deployments/${deploymentName}/chat/${method}?api-version=${apiVersion}`,
-      {
-        messages: data.messages.map((message) =>
-          serializeChatRequestMessage(message),
-        ), // OpenAI 공식 라이브러리처럼 동일하게 messages 직렬화
-        seed: data.seed,
-        max_tokens: data.max_tokens,
-        temperature: data.temperature,
-        top_p: data.top_p,
-        response_format: data.response_format,
-        frequency_penalty: data.frequency_penalty,
-        presence_penalty: data.presence_penalty,
-      },
-      {
-        headers: {
-          'api-key': `${openaiKey}`,
-        },
-        timeout: 30000,
-      },
-    );
-  }
-
-  async handleRateLimitExceeded(error: any) {
-    if (
-      error.response.status === ERROR_CODE.NET_E_TOO_MANY_REQUESTS ||
-      error.response.status === HttpStatus.SERVICE_UNAVAILABLE
-    ) {
-      this.logger.debug(
-        'Rate Limit Exceeded or Service Unavailable, waiting for 1 second...',
-      );
-      await new Promise((resolve) => setTimeout(resolve, 1000)); // 지수 백오프로 변경 고려
-    } else {
-      this.logger.error(error.response.status);
-      this.logger.error(error.response.data);
-      throw new HttpException(
-        error.response.data.message,
-        error.response.status,
-      );
-    }
-  }
+  throw new Error('All retries failed');
 }
-
-// 아래는 OpenAI API의 메시지 직렬화를 위한 serializeChatRequestMessage 함수와 관련 함수들입니다.
-type Message = {
-  content?: string | null;
-  role: string;
-  functionCall?: any;
-  toolCalls?: any[];
-  [key: string]: any; // 동적 속성을 위해 인덱스 시그니처 추가
-};
-
-function serializeChatRequestMessage(message: Message): object {
-  if (message.content === undefined) {
-    message.content = null;
-  }
-  switch (message.role) {
-    case 'assistant': {
-      const { functionCall, toolCalls, ...rest } = message;
-      return {
-        ...snakeCaseKeys(rest),
-        ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-        ...(functionCall ? { function_call: functionCall } : {}),
-      };
-    }
-    default: {
-      return snakeCaseKeys(message);
-    }
-  }
-}
-
-function snakeCaseKeys(obj: any): any {
-  if (typeof obj !== 'object' || !obj) return obj;
-  if (Array.isArray(obj)) {
-    return obj.map((v) => snakeCaseKeys(v));
-  } else {
-    const newObj: { [key: string]: any } = {};
-    Object.keys(obj).forEach((key) => {
-      const value = obj[key];
-      const newKey = toSnakeCase(key);
-      newObj[newKey] = typeof value === 'object' ? snakeCaseKeys(value) : value;
-    });
-    return newObj;
-  }
-}
-
-function toSnakeCase(str: string): string {
-  return str
-    .replace(/([A-Z])/g, (group) => `_${group.toLowerCase()}`)
-    .replace(/^_/, '');
 }
