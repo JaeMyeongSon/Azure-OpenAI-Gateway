@@ -25,8 +25,8 @@ async function bootstrap() {
     expressBasicAuth({
       challenge: true,
       users: {
-        [configService.get<string>('SWAGGER_ID')]:
-          configService.get<string>('SWAGGER_PW'),
+        [configService.get<number>('SWAGGER_ID')]:
+          configService.get<number>('SWAGGER_PW'),
       },
     }),
   );
