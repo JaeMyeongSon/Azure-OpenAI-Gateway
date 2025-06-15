@@ -2,6 +2,8 @@ import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import cookieParser from 'cookie-parser';
+import expressBasicAuth from 'express-basic-auth';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
@@ -16,15 +18,29 @@ async function bootstrap() {
     }),
   );
 
+  app.use(cookieParser());
+
+  app.use(
+    ['/docs', '/docs-json'],
+    expressBasicAuth({
+      challenge: true,
+      users: {
+        [configService.get<number>('SWAGGER_ID')]:
+          configService.get<number>('SWAGGER_PW'),
+      },
+    }),
+  );
+
   const config = new DocumentBuilder()
     .setTitle('OpenAI Loadbalancer API')
     .setDescription('API documentation for OpenAI Loadbalancer')
-    .setVersion('1.0')
+    .setVersion('1.0.1')
+    .addCookieAuth('connect.sid')
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('docs', app, document);
 
-  await app.listen(parseInt(configService.get('PORT') || '3000'));
+  await app.listen(configService.get<number>('PORT') || 3000);
 }
 bootstrap();
