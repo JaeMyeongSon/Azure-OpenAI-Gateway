@@ -18,6 +18,8 @@ export const ChatCompletionRequestSchema = z.object({
   response_format: ResponseFormatSchema.optional(),
   frequency_penalty: z.number().optional(),
   presence_penalty: z.number().optional(),
+  enable_compression: z.boolean().optional(),
+  compression_rate: z.number().min(0.1).max(1.0).optional(),
 });
 
 export type ResponseFormat = z.infer<typeof ResponseFormatSchema>;

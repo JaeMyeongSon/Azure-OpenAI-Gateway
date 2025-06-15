@@ -4,6 +4,7 @@ import { AppService } from './app.service';
 import { APP_PIPE } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { LlmlinguaModule } from './lingua/lingua.module';
 
 @Module({
   imports: [
@@ -11,6 +12,7 @@ import { ConfigModule } from '@nestjs/config';
       isGlobal: true,
       envFilePath: '.env',
     }),
+    LlmlinguaModule,
   ],
   controllers: [AppController],
   providers: [
