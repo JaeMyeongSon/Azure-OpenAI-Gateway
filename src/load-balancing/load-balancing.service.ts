@@ -1,39 +1,32 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import axios from 'axios';
 import { ERROR_CODE, ERROR_MESSAGE } from '../network.status.constants';
+import { ConfigService } from '@nestjs/config';
+
+interface AzureOpenAIConfig {
+  endpoint: string;
+  key: string;
+}
 
 @Injectable()
 export class LoadBalancingService {
   private readonly logger = new Logger(LoadBalancingService.name);
-  constructor() {}
+  private azureOpenAIConfigs: AzureOpenAIConfig[];
 
-  // 엔드포인트 주소 목록
-  endpointList: string[] = [
-    process.env.OPENAI_ENDPOINT1,
-    process.env.OPENAI_ENDPOINT2,
-    process.env.OPENAI_ENDPOINT3,
-    process.env.OPENAI_ENDPOINT4,
-    process.env.OPENAI_ENDPOINT5,
-    process.env.OPENAI_ENDPOINT6,
-    process.env.OPENAI_ENDPOINT7,
-    process.env.OPENAI_ENDPOINT8,
-    process.env.OPENAI_ENDPOINT9,
-    process.env.OPENAI_ENDPOINT10,
-  ];
-
-  // OpenAI 키 목록
-  openaiKeyList: string[] = [
-    process.env.OPENAI_KEY1,
-    process.env.OPENAI_KEY2,
-    process.env.OPENAI_KEY3,
-    process.env.OPENAI_KEY4,
-    process.env.OPENAI_KEY5,
-    process.env.OPENAI_KEY6,
-    process.env.OPENAI_KEY7,
-    process.env.OPENAI_KEY8,
-    process.env.OPENAI_KEY9,
-    process.env.OPENAI_KEY10,
-  ];
+  constructor(private configService: ConfigService) {
+    // 예시: 환경 변수에서 JSON 문자열로 설정 값을 가져오는 경우
+    // AZURE_OPENAI_CONFIGS='[{"endpoint":"ep1","key":"key1"},{"endpoint":"ep2","key":"key2"}]'
+    const configsJson = this.configService.get<string>('AZURE_OPENAI_CONFIGS');
+    try {
+      this.azureOpenAIConfigs = configsJson ? JSON.parse(configsJson) : [];
+    } catch (e) {
+      this.logger.error(
+        'Failed to parse Azure OpenAI configurations from environment variable.',
+      );
+      this.azureOpenAIConfigs = [];
+      // 에러 처리 로직 추가
+    }
+  }
 
   // 해당 함수 내에서 토큰 및 모니터링을 위한 데이터 수집 로직을 추가 해야합니다.(DB 설계 이후)
   async sendAzureOpenAIGetChatCompletions(
@@ -42,14 +35,15 @@ export class LoadBalancingService {
     apiVersion: string,
     data: any,
   ) {
-    for (let i = 0; i < this.endpointList.length; i++) {
+    for (let i = 0; i < this.azureOpenAIConfigs.length; i++) {
       try {
+        const config = this.azureOpenAIConfigs[i];
         this.logger.debug(`Retry ${i}th endpoint`);
-        this.logger.debug(this.endpointList[i]);
+        this.logger.debug(config.endpoint);
 
         const result = await this.sendChatCompletionRequest(
-          this.endpointList[i],
-          this.openaiKeyList[i],
+          config.endpoint,
+          config.key,
           deploymentName,
           method,
           apiVersion,
